@@ -1,8 +1,10 @@
-name: Deploy services via Render Deploy Hooks
+name: Deploy services via Render API
 
-# Дёргаем Deploy Hook сервиса, чья папка менялась. Секреты в GitHub →
-# Settings → Secrets and variables → Actions данного репозитория команды:
-#   RENDER_HOOK_BACKEND, RENDER_HOOK_CIB, RENDER_HOOK_RETAIL.
+# Селективный редеплой: смотрим, в каких папках были изменения, и через
+# Render REST API триггерим деплой только тех сервисов. autoDeploy на
+# самих сервисах выключен — иначе Render всё равно пересобрал бы всё.
+# Секреты репозитория:
+#   RENDER_API_KEY — Bearer-токен Render-аккаунта Виталия
 
 on:
   push:
@@ -28,21 +30,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
-      - name: Detect and deploy
+      - name: Detect changed blocks and trigger deploys
         env:
           MANUAL: ${{ inputs.services }}
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
-          HOOK_BACKEND: ${{ secrets.RENDER_HOOK_BACKEND }}
-          HOOK_CIB: ${{ secrets.RENDER_HOOK_CIB }}
-          HOOK_RETAIL: ${{ secrets.RENDER_HOOK_RETAIL }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SID_BACKEND: srv-d8bjkumk1jcs73f78510
+          SID_CIB: srv-d8bjkvmrnols73ctqgjg
+          SID_RETAIL: srv-d8bjl1b7uimc73dpvkog
         run: |
           set -e
-          # имя → "путь-папки:переменная-хука"
-          MAP="backend:backend:HOOK_BACKEND
-          cib:cib:HOOK_CIB
-          retail:retail:HOOK_RETAIL"
+          if [ -z "$RENDER_API_KEY" ]; then
+            echo "::error::secret RENDER_API_KEY is empty"
+            exit 1
+          fi
+          MAP="backend:backend:$SID_BACKEND
+          cib:cib:$SID_CIB
+          retail:retail:$SID_RETAIL"
 
           if [ "$EVENT" = "workflow_dispatch" ]; then
             CHANGED="__manual__"
@@ -54,7 +60,8 @@ jobs:
           RENDER_ALL=no
           echo "$CHANGED" | grep -qE "^(render\.yaml|seed/)" && RENDER_ALL=yes
 
-          echo "$MAP" | while IFS=: read -r NAME PATHPREFIX HOOKVAR; do
+          echo "$MAP" | while IFS=: read -r NAME PATHPREFIX SID; do
+            NAME=$(echo "$NAME" | tr -d '[:space:]')
             [ -z "$NAME" ] && continue
             HIT=no
             if [ "$EVENT" = "workflow_dispatch" ]; then
@@ -64,11 +71,24 @@ jobs:
               echo "$CHANGED" | grep -qE "^${PATHPREFIX}/" && HIT=yes
               [ "$RENDER_ALL" = "yes" ] && HIT=yes
             fi
-            [ "$HIT" != "yes" ] && { echo "skip $NAME"; continue; }
-            HOOK=$(eval echo "\$$HOOKVAR")
-            if [ -z "$HOOK" ]; then
-              echo "::warning::секрет для $NAME не задан — пропуск"
-            else
-              curl -fsS -X POST "$HOOK" && echo " → triggered $NAME"
+            if [ "$HIT" != "yes" ]; then
+              echo "skip $NAME"
+              continue
             fi
+            if [ -z "$SID" ]; then
+              echo "::warning::service id for $NAME is empty — skip"
+              continue
+            fi
+            echo " → trigger $NAME ($SID)"
+            HTTP=$(curl -sS -o /tmp/resp.json -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer $RENDER_API_KEY" \
+              -H "Content-Type: application/json" \
+              "https://api.render.com/v1/services/$SID/deploys" \
+              -d '{"clearCache":"do_not_clear"}')
+            if [ "$HTTP" != "201" ] && [ "$HTTP" != "200" ]; then
+              echo "::error::Render API returned $HTTP for $NAME"
+              cat /tmp/resp.json
+              exit 1
+            fi
+            echo "   ok: $(python3 -c 'import json,sys; d=json.load(open("/tmp/resp.json")); print(d.get("id","?"))')"
           done
