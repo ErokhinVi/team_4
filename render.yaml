@@ -5,7 +5,7 @@
 # быть заданы OPENAI_API_KEY и ADMIN_TOKEN (см. ORGANIZER.md в
 # организаторском репо).
 #
-# ВНИМАНИЕ: значения <TEAM_SLUG>, <BACKEND_URL>, <CIB_URL> подставляются под
+# ВНИМАНИЕ: значения d, <BACKEND_URL>, <CIB_URL> подставляются под
 # конкретную команду при заведении репозитория (см. SETUP.md в
 # организаторском репо). Пока стоят плейсхолдеры — не оставляй так на проде.
 
@@ -23,7 +23,7 @@ envVarGroups:
 
 services:
   - type: web
-    name: raif-<TEAM_SLUG>-backend
+    name: raif-d-backend
     runtime: docker
     plan: free
     region: oregon
@@ -37,10 +37,10 @@ services:
     envVars:
       - fromGroup: ai-workshop-shared
       - key: TEAM_NAME
-        value: <TEAM_SLUG>
+        value: d
 
   - type: web
-    name: raif-<TEAM_SLUG>-cib
+    name: raif-d-cib
     runtime: docker
     plan: free
     region: oregon
@@ -54,12 +54,12 @@ services:
     envVars:
       - fromGroup: ai-workshop-shared
       - key: TEAM_NAME
-        value: <TEAM_SLUG>
+        value: d
       - key: BACKEND_URL
-        value: https://raif-<TEAM_SLUG>-backend.onrender.com
+        value: https://raif-d-backend.onrender.com
 
   - type: web
-    name: raif-<TEAM_SLUG>-retail
+    name: raif-d-retail
     runtime: docker
     plan: free
     region: oregon
@@ -73,8 +73,8 @@ services:
     envVars:
       - fromGroup: ai-workshop-shared
       - key: TEAM_NAME
-        value: <TEAM_SLUG>
+        value: d
       - key: BACKEND_URL
-        value: https://raif-<TEAM_SLUG>-backend.onrender.com
+        value: https://raif-d-backend.onrender.com
       - key: CIB_URL
-        value: https://raif-<TEAM_SLUG>-cib.onrender.com
+        value: https://raif-d-cib.onrender.com
