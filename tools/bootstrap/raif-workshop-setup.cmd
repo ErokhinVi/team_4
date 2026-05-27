@@ -62,7 +62,7 @@ $OutputEncoding         = [System.Text.UTF8Encoding]::new()
 
 # ── parameters ───────────────────────────────────────────────────────────────
 $RepoUrl          = 'git@github.com:ErokhinVi/team_4.git'
-$RepoDir          = Join-Path $env:USERPROFILE 'AI-Workshop'
+$RepoDir          = Join-Path $env:USERPROFILE 'team_4'
 $SshDir           = Join-Path $env:USERPROFILE '.ssh'
 $SshKeyPath       = Join-Path $SshDir   'raif_workshop'
 $SshConfig        = Join-Path $SshDir   'config'
