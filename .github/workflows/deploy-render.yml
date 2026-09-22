@@ -1,10 +1,21 @@
 name: Deploy services via Render API
 
-# Селективный редеплой: смотрим, в каких папках были изменения, и через
-# Render REST API триггерим деплой только тех сервисов. autoDeploy на
-# самих сервисах выключен — иначе Render всё равно пересобрал бы всё.
-# Секреты репозитория:
-#   RENDER_API_KEY — Bearer-токен Render-аккаунта Виталия
+# Селективный редеплой блоков команды через Render REST API. Автодеплоя у самих
+# сервисов нет: деплой запускает ТОЛЬКО этот workflow, когда в пуше изменилась
+# папка блока.
+#
+# Настройки репозитория ставит организатор (tools/setup/github-access.sh render):
+#   секрет     RENDER_API_KEY
+#   переменные RENDER_SID_BACKEND, RENDER_SID_CIB, RENDER_SID_RETAIL
+# Пока переменных нет (сервисы на Render еще не созданы), job пишет notice и
+# выходит без деплоя.
+#
+# Каждый блок: ОТДЕЛЬНЫЙ job матрицы со СВОЕЙ concurrency-группой
+# (render-deploy-<ref>-<block>). При общей группе и cancel-in-progress:false
+# GitHub держит в очереди лишь один pending-ран, и средний из трех близких по
+# времени пушей вытесняется самым новым: его сервис молча НЕ выезжает.
+# С группой на (ветка, блок) пуши разных блоков идут независимо; повторный пуш
+# ОДНОГО блока отменяет лишь свой незавершенный триггер (выезжает последний).
 
 on:
   push:
@@ -19,76 +30,103 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: render-deploy
-  cancel-in-progress: false
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        block: [backend, cib, retail]
+    concurrency:
+      group: render-deploy-${{ github.ref }}-${{ matrix.block }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
-      - name: Detect changed blocks and trigger deploys
+          # Полная история: в одном пуше бывает несколько коммитов, и для
+          # git diff нужен коммит до пуша.
+          fetch-depth: 0
+      - name: Deploy ${{ matrix.block }} via Render API
         env:
           MANUAL: ${{ inputs.services }}
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
+          BLOCK: ${{ matrix.block }}
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          SID_BACKEND: srv-d8bjkumk1jcs73f78510
-          SID_CIB: srv-d8bjkvmrnols73ctqgjg
-          SID_RETAIL: srv-d8bjl1b7uimc73dpvkog
+          SID_BACKEND: ${{ vars.RENDER_SID_BACKEND }}
+          SID_CIB: ${{ vars.RENDER_SID_CIB }}
+          SID_RETAIL: ${{ vars.RENDER_SID_RETAIL }}
         run: |
           set -e
+          case "$BLOCK" in
+            backend) SID="$SID_BACKEND";;
+            cib)     SID="$SID_CIB";;
+            retail)  SID="$SID_RETAIL";;
+          esac
+          if [ -z "$SID" ]; then
+            echo "::notice::нет переменной RENDER_SID_${BLOCK^^}: сервисов на Render еще нет, деплой $BLOCK пропущен"
+            exit 0
+          fi
+
+          # Нужно ли деплоить ЭТОТ блок?
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            REQ="${MANUAL:-all}"
+            if [ "$REQ" = "all" ] || echo ",$REQ," | grep -q ",$BLOCK,"; then
+              HIT=yes
+            else
+              HIT=no
+            fi
+          else
+            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+               || ! CHANGED=$(git diff --name-only "$BEFORE" "$AFTER"); then
+              # первый пуш или коммит до пуша недоступен: деплоим все блоки
+              CHANGED=$(git ls-files)
+            fi
+            HIT=no
+            # своя папка блока изменилась
+            echo "$CHANGED" | grep -qE "^${BLOCK}/" && HIT=yes
+            # seed/ грузит только backend
+            if [ "$BLOCK" = "backend" ]; then
+              echo "$CHANGED" | grep -qE "^seed/" && HIT=yes
+            fi
+          fi
+
+          if [ "$HIT" != "yes" ]; then
+            echo "skip $BLOCK: его папка не менялась в этом пуше"
+            exit 0
+          fi
           if [ -z "$RENDER_API_KEY" ]; then
-            echo "::error::secret RENDER_API_KEY is empty"
+            echo "::error::секрет RENDER_API_KEY пуст"
             exit 1
           fi
-          MAP="backend:backend:$SID_BACKEND
-          cib:cib:$SID_CIB
-          retail:retail:$SID_RETAIL"
 
-          if [ "$EVENT" = "workflow_dispatch" ]; then
-            CHANGED="__manual__"
-          elif [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            CHANGED=$(git ls-files)
-          else
-            CHANGED=$(git diff --name-only "$BEFORE" "$AFTER" || true)
-          fi
-          RENDER_ALL=no
-          echo "$CHANGED" | grep -qE "^(render\.yaml|seed/)" && RENDER_ALL=yes
-
-          echo "$MAP" | while IFS=: read -r NAME PATHPREFIX SID; do
-            NAME=$(echo "$NAME" | tr -d '[:space:]')
-            [ -z "$NAME" ] && continue
-            HIT=no
-            if [ "$EVENT" = "workflow_dispatch" ]; then
-              REQ="${MANUAL:-all}"
-              { [ "$REQ" = "all" ] || echo ",$REQ," | grep -q ",$NAME,"; } && HIT=yes
-            else
-              echo "$CHANGED" | grep -qE "^${PATHPREFIX}/" && HIT=yes
-              [ "$RENDER_ALL" = "yes" ] && HIT=yes
-            fi
-            if [ "$HIT" != "yes" ]; then
-              echo "skip $NAME"
-              continue
-            fi
-            if [ -z "$SID" ]; then
-              echo "::warning::service id for $NAME is empty — skip"
-              continue
-            fi
-            echo " → trigger $NAME ($SID)"
-            HTTP=$(curl -sS -o /tmp/resp.json -w "%{http_code}" -X POST \
+          echo " → trigger $BLOCK ($SID)"
+          for attempt in 1 2 3 4 5 6; do
+            HTTP=$(curl -sS -D /tmp/headers -o /tmp/resp.json -w "%{http_code}" -X POST \
               -H "Authorization: Bearer $RENDER_API_KEY" \
+              -H "Accept: application/json" \
               -H "Content-Type: application/json" \
               "https://api.render.com/v1/services/$SID/deploys" \
-              -d '{"clearCache":"do_not_clear"}')
-            if [ "$HTTP" != "201" ] && [ "$HTTP" != "200" ]; then
-              echo "::error::Render API returned $HTTP for $NAME"
-              cat /tmp/resp.json
-              exit 1
-            fi
-            echo "   ok: $(python3 -c 'import json,sys; d=json.load(open("/tmp/resp.json")); print(d.get("id","?"))')"
+              -d '{"clearCache":"do_not_clear"}') || HTTP=000
+            case "$HTTP" in
+              200|201|202)
+                echo "   ok: Render принял деплой (HTTP $HTTP)"
+                exit 0;;
+              429)
+                WAIT=$(tr -d '\r' < /tmp/headers | awk 'tolower($1) == "retry-after:" { print int($2) }' | tail -1)
+                WAIT=${WAIT:-30}
+                if [ "$WAIT" -gt 120 ]; then WAIT=120; fi
+                echo "   Render: лимит запросов, жду ${WAIT}s (попытка $attempt)";;
+              000|5*)
+                WAIT=$((attempt * 10))
+                echo "   Render не ответил (HTTP $HTTP), повтор через ${WAIT}s";;
+              *)
+                echo "::error::Render API вернул $HTTP для $BLOCK"
+                cat /tmp/resp.json || true
+                exit 1;;
+            esac
+            sleep "$WAIT"
           done
+          echo "::error::Render не принял деплой $BLOCK за 6 попыток"
+          exit 1
