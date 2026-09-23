@@ -33,7 +33,7 @@ PRODUCTS = [
     CREDIT,
 ]
 
-app = FastAPI(title="cib — корпоратив и бизнес-логика", version="1.0.0")
+app = FastAPI(title="cib — корпоратив и бизнес-логика", version="1.1.0")
 
 
 class CreditRequest(BaseModel):
